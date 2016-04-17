@@ -1,0 +1,198 @@
+---
+title: "Qualifying Physical Activity - Course Project"
+author: "Madhuri Gupta"
+output: html_document
+---
+
+```{r, echo=FALSE}
+knitr::opts_chunk$set(error = TRUE)
+```
+
+## Loading required Libraries and Datasets
+
+```{r, cache=TRUE}
+
+# Load relevant libraries
+suppressPackageStartupMessages(library(caret))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(randomForest))
+suppressPackageStartupMessages(library(e1071))
+suppressPackageStartupMessages(library(kernlab))
+suppressPackageStartupMessages(library(knitr))
+suppressPackageStartupMessages(library(parallel))
+suppressPackageStartupMessages(library(doParallel))
+suppressPackageStartupMessages(library(foreach))
+suppressPackageStartupMessages(library(iterators))
+suppressPackageStartupMessages(library(rpart))
+
+# Reading training data
+dat <- read.csv("pml-training.csv")
+dat_test <-  read.csv("pml-testing.csv")
+# Keep another copy of test data for use with final prediction
+dat_test_original <- dat_test
+str(dat)
+print(dim(dat))
+print(dim(dat_test))
+```
+
+## Cleaning datasets
+
+
+#### Dropping irrelevant variables
+
+There are some variables for ID, user name, window, time stamps which do not have any information regarding movements of belt, forearm, arm or dumbbell. These, except the outcome variable "classe", are dropped from both testing and training data.   
+
+```{r, cache=TRUE}
+# Match names
+colnames(dat_test) <- colnames(dat)
+dat <- dat[grepl("arm|dumbbell|belt|classe", colnames(dat))]
+dat_test <- dat_test[grepl("arm|dumbbell|belt|classe", colnames(dat_test))]
+print(dim(dat))
+print(dim(dat_test))
+```
+
+
+#### Finding and dropping variables with majority of either NA or blank values
+
+```{r, cache=TRUE}
+NAvalues <- sapply(dat, function(x) ( sum(is.na(x) | x=="")/(nrow(dat)) ) > 0.6)
+table(NAvalues)
+```
+
+There are 100 variables with more than 60% of total records as either NA or blank. These variables are not useful in building the prediction model and are dropped from both datasets.   
+
+```{r, cache=TRUE}
+# Drop variable with majority of values being NA or blank
+dat <- dat[!NAvalues]
+dat_test <- dat_test[!NAvalues]
+rm(NAvalues)
+
+# Finding near zero variance variables, if any
+nsv <- nearZeroVar(dat, saveMetrics = TRUE)
+subdat <- dat[, nsv$nzv]
+summary((subdat))
+rm(nsv, subdat)
+```
+
+Summary shows that the there are no near zero variance predictors left.  
+
+#### Coerce data types of training set 'dat' from testing dataset 'dat_test' for unambiguous analysis
+
+```{r, cache=TRUE}
+dat_class <- sapply(dat, class)
+dat_test_class <- sapply(dat_test, class)
+differentClassCol <- colnames(dat_test[!(dat_class == dat_test_class)])
+for(i in 1:length(differentClassCol)){
+    dat[, differentClassCol[i]] <- as(dat[, differentClassCol[i]], class(dat_test[, differentClassCol[i]]))
+}
+
+# To check if coercion is successful
+dat_class <- sapply(dat, class)
+identical(dat_class, dat_test_class)
+dat$classe <- as.factor(dat$classe) # Make sure classe is factor variable
+rm(dat_class, dat_test_class, differentClassCol, i)
+```
+
+The result is TRUE, hence all predictor variables have same class. The final training and testing datasets are ready for further analysis.  
+
+After cleaning the data, variables selected for further analysis to build the model are:
+```{r, cache=TRUE}
+names(dat[-nrow(dat)]) # Removing the outcome variable to avoid being listed with predictors
+```
+
+## Pre-processing Datasets
+
+#### Set seed
+
+```{r, cache=TRUE}
+set.seed(1234)
+```
+
+
+```{r, cache=TRUE, echo=FALSE}
+# #### Dimensionality Reduction using PCA & Cross-Validation to avoid Overfitting
+# 
+# Found correlated variables and performed PCA as many variables are correlated.     
+
+# # Find Correlated Variables
+# corIndex <- findCorrelation(cor(dat[, -53]), cutoff=0.8)
+# names(dat[corIndex])
+# rm(corIndex)
+# # Perform PCA and Cross-Validation
+# pcaObj <- preProcess(dat[,-53], method=c("center","scale","pca"))
+# datAfterPCA <- predict(pcaObj, dat[,-53])
+# dat_testAfterPCA <- predict(pcaObj, dat_test[,-53])
+
+```
+
+## Model selection
+
+Given it is a classification problem for more than two levels in outcome, I have tried two approaches - Random forest (rf) and SVM Radial (svmRadial). To avoid overfitting and have a balanced bias-variance trade-off I did 10-fold Cross-Validation.
+
+```{r, cache=TRUE}
+clus <- makeCluster(detectCores() - 1)
+registerDoParallel(clus)
+trnControl <- trainControl(method = "cv", number = 10, verboseIter=FALSE, allowParallel=TRUE)
+rfFit <- train(y=dat$classe, x=dat[,-53], data=dat, method = "rf", trControl= trnControl)
+svmrFit <- train(y=dat$classe, x=dat[,-53], data=dat, method = "svmRadial", trControl= trnControl)
+stopCluster(clus)
+```
+
+The accuracies for the above models are as below:
+
+```{r, cache=TRUE}
+Model <- c("Random Forest", "SVM (Radial)")
+Accuracy <- c(max(rfFit$results$Accuracy), max(svmrFit$results$Accuracy))
+Kappa <- c(max(rfFit$results$Kappa), max(svmrFit$results$Kappa))
+modelStats <- cbind(Model, Accuracy, Kappa)
+kable(modelStats)
+rm(Model, Accuracy, Kappa)
+```
+
+## Final Model
+
+Random forest model provides the best accuracy and has been used to predict class of exercise for the test data 'dat_test'.
+
+```{r, cache=TRUE}
+varImp(rfFit)
+rfFit$finalModel
+```
+
+## Error Expectations 
+
+Even if the Out-of sample error cannot be estimated exactly, the in-sample error obtained through cross-validation is calculated over different samples of test sets and should provide a better estimate of out-of sample error in comparison to the case of no cross-validation.  
+
+**The estimated error rate is less than 1%** 
+
+## Prediction on test dataset 'dat_test':
+
+```{r, cache=TRUE}
+results <- predict(rfFit, dat_test[,-53])
+test_results <- cbind(results, dat_test_original[, c(1,2,5)])
+print(test_results)
+rm(test_results, modelStats)
+```
+
+## Submission function to write output files
+
+Write submission files to CourseProjAnswers folder
+
+```{r}
+pml_write_files = function(x){
+  n = length(x)
+  path <- "CourseProjAnswers"
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=file.path(path, filename),quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+pml_write_files(results)
+```
+
+## Results Accuracy
+
+The algorithm predicted outcome with 100% accuracy.
+
+## Data Courtesy: 
+
+I would like to thank the source for this dataset: <http://groupware.les.inf.puc-rio.br/har#weight_lifting_exercises>
